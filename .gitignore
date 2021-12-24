@@ -127,3 +127,11 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# data
+data
+models
+
+# notebooks
+eda.ipynb
+mltest_1.ipynb

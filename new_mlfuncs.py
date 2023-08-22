@@ -9,7 +9,7 @@ import seaborn as sns
 import funcs
 import eda_plots
 import utils
-# import models
+import models
 import dlfuncs
 
 # import machine learning modules
@@ -28,8 +28,8 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.ensemble import VotingClassifier, RandomForestClassifier
 from sklearn import svm
-# import xgboost
-# import catboost
+import xgboost
+import catboost
 
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 import sklearn.externals
@@ -37,6 +37,7 @@ import joblib
 
 # set seed for reproducibility
 SEED = 24
+
 # process data before machine learning preprocessing
 def pre_ml_preprocessing(df, initial_to_drop, num_cols, target_var = None, missing_val_threshold = 40, num_cols_threshold = 0.9, low_var_threshold = 0.9):
     """Process data for machine learning preprocessing.
@@ -92,6 +93,76 @@ def pre_ml_preprocessing(df, initial_to_drop, num_cols, target_var = None, missi
     
     return df
 
+## target encoding  
+def test_mean_target_encoding(train, test, target, categorical, alpha=5):
+    # Calculate global mean on the train data
+    global_mean = train[target].mean()
+    
+    # Group by the categorical feature and calculate its properties
+    train_groups = train.groupby(categorical)
+    category_sum = train_groups[target].sum()
+    category_size = train_groups.size()
+    
+    # Calculate smoothed mean target statistics
+    train_statistics = (category_sum + global_mean * alpha) / (category_size + alpha)
+    
+    # Apply statistics to the test data and fill new categories
+    test_feature = test[categorical].map(train_statistics).fillna(global_mean)
+    return test_feature.values
+
+def train_mean_target_encoding(train, target, categorical, alpha=5):
+    # Create 5-fold cross-validation
+    kf = KFold(n_splits=5, random_state=123, shuffle=True)
+    train_feature = pd.Series(index=train.index)
+    
+    # For each folds split
+    for train_index, test_index in kf.split(train):
+        cv_train, cv_test = train.iloc[train_index], train.iloc[test_index]
+      
+        # Calculate out-of-fold statistics and apply to cv_test
+        cv_test_feature = test_mean_target_encoding(cv_train, cv_test, target, categorical, alpha)
+        
+        # Save new feature for this particular fold
+        train_feature.iloc[test_index] = cv_test_feature       
+    return train_feature.values
+
+def mean_target_encoding(train, test, target, categorical, alpha=5):
+  
+    # Get the train feature
+    train_feature = train_mean_target_encoding(train, target, categorical, alpha)
+  
+    # Get the test feature
+    test_feature = test_mean_target_encoding(train, test, target, categorical, alpha)
+    
+    # Return new features to add to the model
+    return train_feature, test_feature  
+
+def target_encode_categorical_features(train, test, target, alpha=5):
+    train = train.copy().dropna()
+    test = test.copy().dropna()
+    le = LabelEncoder()
+    le = le.fit(train[target])
+    train['target_encoded'] = le.transform(train[target])
+    train.drop(target, axis=1, inplace=True)
+    target = 'target_encoded'
+    train_cols = train.columns.tolist()
+    for col in train_cols:
+        if col in target:
+            pass
+        else:
+            if col not in target:
+                if train[col].dtypes == 'object':
+                    uniques = funcs.unique_vals_column(train, col, normalize = False)
+                    if len(uniques) <= 2:
+                        pass
+                    elif len(uniques) > 2:
+                        train_feature, test_feature = mean_target_encoding(train=train, test=test, target=target, categorical=col, alpha=alpha)
+                        train[col] = train_feature
+                        test[col] = test_feature
+
+    return train, test, le
+
+
 def split_data(df, target_var, stratify = True, test_size = 0.25):
     """Split data into train and test set.
 
@@ -145,7 +216,6 @@ def split_data(df, target_var, stratify = True, test_size = 0.25):
         raise utils.InvalidDataFrame(df)
 
     return X_train, X_test, y_train, y_test
-
 
 def extract_cat_num_text_feats(X_train, text_feats = None):
     """Extract categorical and numerical features.
@@ -240,8 +310,8 @@ def preprocess_col_transformer(cat_feats, num_feats, text_feats = None):
             if not text_feats:
                 # create instances for imputation and encoding of categorical variables
                 cat_imp = SimpleImputer(strategy = 'constant', fill_value = 'missing')
-                ohe = OneHotEncoder(handle_unknown = 'ignore')
-                cat_pipeline = make_pipeline(cat_imp, ohe)
+                le_binary = LabelEncoder()
+                cat_pipeline = make_pipeline(cat_imp, le_binary)
 
                 # create instances for imputation and encoding of numerical variables
                 num_imp = SimpleImputer(missing_values = np.nan, strategy = 'mean')
@@ -258,8 +328,8 @@ def preprocess_col_transformer(cat_feats, num_feats, text_feats = None):
             elif text_feats:
                 # create instances for imputation and encoding of categorical variables
                 cat_imp = SimpleImputer(strategy = 'constant', fill_value = 'missing')
-                ohe = OneHotEncoder(handle_unknown = 'ignore')
-                cat_pipeline = make_pipeline(cat_imp, ohe)
+                le_binary = LabelEncoder()
+                cat_pipeline = make_pipeline(cat_imp, le_binary)
 
                 # create instances for imputation and encoding of numerical variables
                 num_imp = SimpleImputer(missing_values = np.nan, strategy = 'mean')
@@ -284,13 +354,14 @@ def preprocess_col_transformer(cat_feats, num_feats, text_feats = None):
                
     return preprocessor
 
+
 def multi_models_classifiers(df, target_var,  feats_to_exclude, stratify = True, test_size = 0.25, classifier_type = 'multi_class', text_feats = None):
     # split data
     X_train, X_test, y_train, y_test = split_data(df, target_var=target_var, stratify = stratify, test_size = test_size)
     # extract cat_feats, num_feats, text_feats
-    cat_feats, num_feats, text_feats = dlfuncs.extract_cat_num_text_feats_for_keras(X_train, feats_to_exclude=feats_to_exclude, text_feats = text_feats)
+    cat_feats, num_feats, text_feats = extract_cat_num_text_feats(X_train, text_feats = text_feats)
     # extract processor pipeline
-    preprocessor = dlfuncs.preprocess_col_transformer_for_keras(cat_feats, num_feats, text_feats = text_feats)
+    preprocessor = preprocess_col_transformer(cat_feats, num_feats, text_feats = text_feats)
     # get classifiers list
     classifiers = models.classifiers_ensemble(type = classifier_type)
     # dictionaries to hold accuracy and f1 scores
@@ -348,9 +419,9 @@ def best_classifier_hyperparameter(df, best_classifier, target_var, feats_to_exc
      # split data
     X_train, X_test, y_train, y_test = split_data(df, target_var=target_var, stratify = stratify, test_size = test_size)
     # extract cat_feats, num_feats, text_feats
-    cat_feats, num_feats, text_feats = dlfuncs.extract_cat_num_text_feats_for_keras(X_train, feats_to_exclude=feats_to_exclude, text_feats = text_feats)
+    cat_feats, num_feats, text_feats = extract_cat_num_text_feats(X_train, feats_to_exclude=feats_to_exclude, text_feats = text_feats)
     # extract processor pipeline
-    preprocessor = dlfuncs.preprocess_col_transformer_for_keras(cat_feats, num_feats, text_feats = text_feats)
+    preprocessor = preprocess_col_transformer(cat_feats, num_feats, text_feats = text_feats)
     # extract best regressor model and grid params
     grid_params, grid_model = models.classifier_ensemble_hyperparameters(best_classifier)
     # instantiate pipeline
@@ -359,7 +430,7 @@ def best_classifier_hyperparameter(df, best_classifier, target_var, feats_to_exc
     # dictionary to hold gridsearch model output
     GridSearchCV_model_output = {}
     # create gridsearch object
-    grid_search = GridSearchCV(pipe, param_grid=grid_params, cv = 5, scoring = 'f1_micro', refit = True, return_train_score = True)
+    grid_search = GridSearchCV(pipe, param_grid=grid_params, cv = 3, scoring = 'f1_micro', refit = True, return_train_score = True)
     # grid_search = RandomizedSearchCV(pipe, param_distributions=grid_params, n_iter=100, cv = 5, scoring = 'f1_micro', random_state=SEED, refit = True, n_jobs = 4, return_train_score = True)
     # fit gridsearch to training data
     grid_search.fit(X_train, y_train)
@@ -374,7 +445,7 @@ def best_classifier_hyperparameter(df, best_classifier, target_var, feats_to_exc
     print("Best score after GridSearchCV:\n {:.2f}".format(grid_best_score))
     # get feature names
     cat_feature_names = grid_search.best_estimator_.named_steps['columntransformer'].named_transformers_['pipeline-1'].\
-        named_steps['onehotencoder'].get_feature_names(input_features = cat_feats)
+        named_steps['labelencoder'].get_feature_names(input_features = cat_feats)
     all_feature_names = np.r_[cat_feature_names, num_feats]
     # list to hold coefs or feature imporatnces in the case of decision trees and random forest
     coefs_or_feats_imp = []
@@ -400,8 +471,6 @@ def best_classifier_hyperparameter(df, best_classifier, target_var, feats_to_exc
     GridSearchCV_model_output['best_classifier_feature_importances'] = df_coef
     # grab names of predictors
     GridSearchCV_model_output['final_predictors'] = X_train.columns.tolist()
-
-
     return GridSearchCV_model_output
 
 def dump_estimator(GridSearchCV_model_output, dump_path):
@@ -413,102 +482,29 @@ def dump_estimator(GridSearchCV_model_output, dump_path):
     joblib.dump(best_estimator, dump_path)
     return None
 
-def make_predictios(df_to_predict_path, submission_format_path,  my_submission_path, model_path, final_predictors):
+def make_predictios(test, submission_format_path,  my_submission_path, model_path, final_predictors, le):
     # load model
     # predictors = list(GridSearchCV_model_output)[0]['final_predictors']
     if os.path.exists(model_path):
         best_model = joblib.load(model_path)
-        if os.path.exists(df_to_predict_path):
-            df_to_predict = pd.read_csv(df_to_predict_path, index_col = 'id')
-            df_to_predict_cols = df_to_predict.columns.tolist()
-            if os.path.exists(submission_format_path):
-                df_to_submit = pd.read_csv(submission_format_path, index_col = 'id')
-                membership = all(col in df_to_predict_cols for col in final_predictors)
-                if membership:
-                    X_predictors = df_to_predict[final_predictors]
-                    y_predicted = best_model.predict(X_predictors)
-                    submission = pd.DataFrame(data = y_predicted, columns = df_to_submit.columns, index = df_to_submit.index)
-                    submission.to_csv(my_submission_path)
-                else:
-                    not_cols = []
-                    for col in final_predictors:
-                        if col not in df_to_predict_cols:
-                            not_cols.append(col)
-                    raise utils.InvalidColumn(not_cols)
+        if os.path.exists(submission_format_path):
+            df_to_submit = pd.read_csv(submission_format_path, index_col = 'id')
+            test_cols = test.columns.tolist()
+            membership = all(col in test_cols for col in final_predictors)
+            if membership:
+                X_predictors = test[final_predictors]
+                y_predicted = best_model.predict(X_predictors)
+                labels = le.inverse_transform(y_predicted)
+                submission = pd.DataFrame(data = labels, columns = df_to_submit.columns, index = df_to_submit.index)
+                submission.to_csv(my_submission_path)
             else:
-                raise utils.InvalidFilePath(submission_format_path)
+                not_cols = []
+                for col in final_predictors:
+                    if col not in test_cols:
+                        not_cols.append(col)
+                raise utils.InvalidColumn(not_cols)
         else:
-            raise utils.InvalidFilePath(df_to_predict_path)
+            raise utils.InvalidFilePath(submission_format_path)
     else:
         raise utils.InvalidFilePath(model_path)
     return submission
-
-##############################################################################
-## target encoding  
-def test_mean_target_encoding(train, test, target, categorical, alpha=5):
-    # Calculate global mean on the train data
-    global_mean = train[target].mean()
-    
-    # Group by the categorical feature and calculate its properties
-    train_groups = train.groupby(categorical)
-    category_sum = train_groups[target].sum()
-    category_size = train_groups.size()
-    
-    # Calculate smoothed mean target statistics
-    train_statistics = (category_sum + global_mean * alpha) / (category_size + alpha)
-    
-    # Apply statistics to the test data and fill new categories
-    test_feature = test[categorical].map(train_statistics).fillna(global_mean)
-    return test_feature.values
-
-def train_mean_target_encoding(train, target, categorical, alpha=5):
-    # Create 5-fold cross-validation
-    kf = KFold(n_splits=5, random_state=123, shuffle=True)
-    train_feature = pd.Series(index=train.index)
-    
-    # For each folds split
-    for train_index, test_index in kf.split(train):
-        cv_train, cv_test = train.iloc[train_index], train.iloc[test_index]
-      
-        # Calculate out-of-fold statistics and apply to cv_test
-        cv_test_feature = test_mean_target_encoding(cv_train, cv_test, target, categorical, alpha)
-        
-        # Save new feature for this particular fold
-        train_feature.iloc[test_index] = cv_test_feature       
-    return train_feature.values
-
-def mean_target_encoding(train, test, target, categorical, alpha=5):
-  
-    # Get the train feature
-    train_feature = train_mean_target_encoding(train, target, categorical, alpha)
-  
-    # Get the test feature
-    test_feature = test_mean_target_encoding(train, test, target, categorical, alpha)
-    
-    # Return new features to add to the model
-    return train_feature, test_feature    
-
-def target_encode_categorical_features(train, test, target, alpha=5):
-    train_feats = []
-    test_feats = []
-    le = LabelEncoder()
-    le = le.fit(train[target])
-    train['target_encoded'] = le.transform(train[target])
-    train.drop(target, axis=1, inplace=True)
-    target = 'target_encoded'
-    train_cols = train.columns.tolist()
-    for col in train_cols:
-        if col in target:
-            pass
-        else:
-            if col not in target:
-                if train[col].dtypes == 'object':
-                    uniques = funcs.unique_vals_column(train, col, normalize = False)
-                    if len(uniques) <= 2:
-                        pass
-                    elif len(uniques) > 2:
-                        train_feature, test_feature = mean_target_encoding(train=train, test=test, target=target, categorical=col, alpha=alpha)
-                        train[col] = train_feature
-                        test[col] = test_feature
-
-    return train, test, le

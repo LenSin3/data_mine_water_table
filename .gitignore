@@ -135,3 +135,7 @@ models
 # notebooks
 eda.ipynb
 mltest_1.ipynb
+keras_1.ipynb
+tf_decision_trees.ipynb
+keras_functional_1.ipynb
+xgboost_1.ipynb
